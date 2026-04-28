@@ -1,204 +1,164 @@
 # X-ray Preprocessing for Frost Formation Imaging
 
-Preprocessing pipeline for X-ray imagery of sublimating dry ice. Output feeds into an ML proof-of-concept that renders frost formation from sparse imaging data.
+Preprocessing pipeline for X-ray imagery of sublimating dry ice. Output feeds into a planned ML proof-of-concept that renders frost formation from sparse imaging.
 
 **Author:** Luke Waszyn
-**Lab:** Penn State HEATER Lab — Experimental Frost Setup
+**Lab:** Penn State HEATER Lab, Experimental Frost Setup
 
-Available in both Python and MATLAB. Pick whichever fits your workflow — the two implementations produce the same output.
+Available in Python and MATLAB. Pick whichever fits your workflow; both produce the same output.
 
-> Note on terminology: this is *preprocessing* (preparing data before it goes to an ML model), not the model itself. The ML/rendering "processing" stage is planned but not implemented yet. See [Roadmap](#roadmap) below.
-
----
+This is *preprocessing* (data prep before ML), not the ML model itself. The model is planned but not implemented yet. See [Roadmap](#roadmap).
 
 ## What it does
 
-Given a multi-page X-ray TIFF (the sample) and optional dark/flat-field TIFFs, the pipeline produces normalized and contrast-enhanced versions of each frame, plus a mean-stacked composite with improved signal-to-noise.
+Takes a multi-page X-ray TIFF (the sample) plus optional dark/flat frames. Outputs normalized and contrast-enhanced versions of each frame, plus a mean-stacked composite with better signal-to-noise.
 
-### Pipeline pseudocode
+### Pipeline
 
 ```
 INPUT: object.tiff, [dark.tiff], [flat.tiff]
 
-# Stage 1 — Frame selection
-stack <- load(object.tiff)
-frames <- pages where >50% of pixels are nonzero  # drops empty pages
+# 1. Drop empty pages from acquisition glitches
+frames = pages where >50% of pixels are nonzero
 
-# Stage 2 — Flat-field correction (per frame)
-for each frame in frames:
-    corrected <- (frame - dark) / (flat - dark)
-    # falls back to (frame - dark) if no flat
-    # falls back to frame if no dark
+# 2. Flat-field correction (per frame)
+corrected = (frame - dark) / (flat - dark)
+# Falls back to (frame - dark) if no flat.
+# Falls back to frame if no dark.
 
-# Stage 3 — Percentile normalization (per frame)
-    lo <- 1st percentile of corrected
-    hi <- 99th percentile of corrected
-    normalized <- clip((corrected - lo) / (hi - lo), 0, 1)
+# 3. Percentile normalization to [0, 1]
+lo = 1st percentile of corrected
+hi = 99th percentile of corrected
+normalized = clip((corrected - lo) / (hi - lo), 0, 1)
 
-# Stage 4 — Contrast enhancement (per frame)
-    clahe <- CLAHE(normalized, clip_limit=0.01)
-    gamma <- normalized ^ 0.6
+# 4. Contrast enhancement
+clahe = CLAHE(normalized, clip_limit=0.01)
+gamma = normalized ^ 0.6
 
-# Stage 5 — Signal averaging
-mean_stack <- mean(frames)
-# repeat stages 2-4 on mean_stack
+# 5. Mean stack
+mean_stack = mean(frames)
+# repeat steps 2-4 on mean_stack
 
-# Stage 6 — Save
-for each result:
-    write 16-bit TIFF (full grayscale precision, for ML)
-    write 8-bit PNG  (for viewing)
-    write 4-panel comparison figure
+# 6. Save
+write 16-bit TIFF (full grayscale, for ML)
+write 8-bit PNG  (for viewing)
+write 4-panel comparison figure
 ```
 
 ### Why each step
 
 | Step | Why |
 |---|---|
-| **Frame selection** | Acquisition software saves empty/partial pages when captures fail. We drop them automatically so you don't have to pre-clean the TIFF. |
-| **Flat-field correction** | Standard X-ray radiometry. Removes detector baseline (dark) and corrects for beam-intensity non-uniformity (flat). |
-| **Percentile clipping** | A handful of hot/dead pixels at the extremes will otherwise collapse the useful dynamic range during min-max stretching. Clipping at 1/99 preserves >98% of pixels. |
-| **CLAHE** | Sample and background have very different contrast levels; global histogram equalization over- or under-corrects regions. CLAHE adapts locally, making frost/edge features visible without blowing out the bright background. |
-| **Gamma** | Alternative enhancement. Doesn't amplify noise the way CLAHE can. Saved alongside CLAHE for comparison. |
-| **Mean stacking** | An N-frame average reduces shot noise by √N. With ~7 frames that's ~2.6× cleaner output. |
-
----
+| **Frame selection** | Acquisition saves blank pages on failed captures. Drop them automatically. |
+| **Flat-field** | Standard X-ray correction. Removes detector baseline (dark) and beam non-uniformity (flat). |
+| **Percentile clipping** | Hot/dead pixels at the extremes will collapse the dynamic range. Clipping at 1/99 keeps >98% of pixels intact. |
+| **CLAHE** | Sample and background have very different contrasts. Local equalization makes frost edges visible without blowing out bright areas. |
+| **Gamma** | Less aggressive alternative to CLAHE. Doesn't amplify noise the same way. |
+| **Mean stacking** | Averaging N frames cuts shot noise by sqrt(N). With 7 frames, ~2.6x cleaner. |
 
 ## Grayscale preservation
 
-This pipeline works with **continuous pixel intensities** at every stage. There is no thresholding to binary (no "is something there or not" decision). A pixel reading 1850 stays a number close to 1850 throughout. The only place pixels get clamped is at the percentile extremes (top/bottom 1%), and that's intentional — it removes detector defects without affecting real signal.
-
-Precision at each stage:
+Pixel intensities are continuous through the whole pipeline. Nothing gets thresholded to binary. A pixel reading 1850 stays a number close to 1850.
 
 | Stage | Type | Levels |
 |---|---|---|
-| Raw input | `uint16` | ~65,000 |
-| Flat-field math | `float32` | continuous |
-| Percentile-normalized | `float32` in [0, 1] | continuous |
-| CLAHE / Gamma | `float32` in [0, 1] | continuous |
-| **Saved `.tiff`** | **`uint16`** | **~65,000** |
-| Saved `.png` | `uint8` | 256 |
+| Raw input | uint16 | ~65,000 |
+| Math stages | float32 | continuous |
+| **Saved .tiff** | **uint16** | **~65,000** |
+| Saved .png | uint8 | 256 |
 
-**For the ML stage, always read from the `.tiff` files, not the `.png`s.** The PNGs are quantized to 8-bit for display purposes only and lose ~99% of the dynamic range.
+**Use the .tiff files for ML.** PNGs are quantized to 8-bit for previewing only.
 
-You can verify grayscale preservation on your own outputs:
+Verify on your own outputs:
 
 ```matlab
-% MATLAB
 img = imread('outputs/mean_stack/normalized.tiff');
 fprintf('Distinct gray levels: %d\n', numel(unique(img(:))));
-% Should print thousands (typically 30,000 - 60,000)
 ```
 
 ```python
-# Python
 import tifffile, numpy as np
 img = tifffile.imread('outputs/mean_stack/normalized.tiff')
 print(f"Distinct gray levels: {len(np.unique(img))}")
 ```
 
----
+## Python
 
-## Python — Usage
-
-### Setup (one-time)
+### Setup
 
 ```bash
 git clone https://github.com/lukejwaszyn/xray-preprocessing.git
 cd xray-preprocessing
 python3 -m venv .venv
-source .venv/bin/activate           # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Run it
+### Run
 
-**Interactive (easiest)** — no arguments, file pickers open:
-
+File picker:
 ```bash
 python src/preprocess.py
 ```
 
-You'll be prompted for:
-1. Object TIFF (required)
-2. Dark TIFF (optional — Cancel to skip)
-3. Flat TIFF (optional — Cancel to skip)
-4. Output folder
-
-**Command line:**
-
+Command line:
 ```bash
 python src/preprocess.py --object file.tiff --dark dark.tiff --out outputs
 ```
 
-| Flag | Default | Purpose |
-|---|---|---|
-| `--object` | *(required)* | Input TIFF |
-| `--dark` | none | Dark-frame TIFF |
-| `--flat` | none | Flat-field TIFF |
-| `--out` | `outputs` | Output folder |
-| `--prefix` | none | Filename prefix to keep multiple runs separate |
+Flags: `--object` (required), `--dark`, `--flat`, `--out`, `--prefix`.
 
----
+## MATLAB
 
-## MATLAB — Usage
-
-Requires MATLAB R2020a+ and the Image Processing Toolbox.
-
-**Interactive:**
+Requires R2020a+ and the Image Processing Toolbox.
 
 ```matlab
 cd matlab
 preprocess_xray()
 ```
 
-**With arguments:**
-
+Or:
 ```matlab
 preprocess_xray('object', 'file.tiff', 'dark', 'dark.tiff', 'out', 'outputs')
 ```
 
-Optional name-value arguments: `object`, `dark`, `flat`, `out`, `prefix`.
-
----
+Args: `object`, `dark`, `flat`, `out`, `prefix`.
 
 ## Output structure
 
 ```
 outputs/
 ├── frame00/
-│   ├── normalized.tiff   # 16-bit, for ML
-│   ├── normalized.png    # 8-bit, for viewing
+│   ├── normalized.tiff      16-bit, for ML
+│   ├── normalized.png       8-bit, for viewing
 │   ├── clahe.tiff / .png
 │   └── gamma.tiff / .png
-├── frame01/  ...etc
-├── mean_stack/           # averaged composite, best SNR
+├── frame01/  ...
+├── mean_stack/              best SNR
 └── figures/
-    ├── frame00_comparison.png       # 4-panel: raw / norm / CLAHE / gamma
-    ├── mean_stack_comparison.png
+    ├── frame00_comparison.png
     └── ...
 ```
 
----
-
 ## Roadmap
 
-Current version covers **normalization + contrast enhancement only**. Planned next stages:
+Currently: normalization + contrast. Planned next:
 
-- **Resolution upscaling** — start with bicubic/Lanczos, move to learned super-resolution (SwinIR, Real-ESRGAN) if needed.
-- **Frost-formation renderer** — neural model trained to interpolate frost growth between sparse frames. Inputs: the 16-bit normalized TIFFs. Ground truth: the mass-loss time series from the experimental log.
+- Resolution upscaling (bicubic first, then learned SR if needed).
+- Frost-formation renderer. ML model interpolating frost growth from sparse frames. Input: 16-bit normalized TIFFs. Ground truth: mass-loss time series from the experimental log.
 
-## Known data-acquisition issues
+## Known data issues
 
-- **Dark integrity:** the test `dark.tiff` was effectively all zeros (66 nonzero pixels out of ~90 million). Dark frames need reacquiring with the detector in standard readout mode.
-- **Empty frames:** the test `object1_hole.tiff` had 21 pages but only ~7 with real data. Confirm acquisition trigger settings.
-- **No flat field:** when an open-beam exposure becomes available, pass it with `--flat` / `'flat'` to enable full flat-field correction.
+- **Dark frame:** the test dark.tiff was effectively all zeros. Needs reacquiring.
+- **Empty pages:** test object1_hole.tiff had 21 pages but only 7 with real data.
+- **No flat field yet.** When available, pass with `--flat` / `'flat'`.
 
-## Repository layout
+## Layout
 
 ```
 .
-├── src/preprocess.py         # Python pipeline
-├── matlab/preprocess_xray.m  # MATLAB port
+├── src/preprocess.py
+├── matlab/preprocess_xray.m
 ├── notebooks/01_explore.ipynb
 ├── requirements.txt
 ├── .gitignore
