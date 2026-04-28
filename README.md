@@ -169,3 +169,14 @@ Currently: normalization + contrast. Planned next:
 ## License
 
 MIT
+
+## Example outputs
+
+Run on `specimen_with_frost.tiff` with `noobject.tiff` as the flat field. See `examples/`.
+
+| File | Stage |
+|---|---|
+| `mean_stack_comparison.png` | All four stages side by side |
+| `normalized.png` | After flat-field + percentile normalization |
+| `clahe.png` | After CLAHE local contrast enhancement |
+| `gamma.png` | After gamma correction |
