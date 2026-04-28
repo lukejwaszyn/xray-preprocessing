@@ -1,11 +1,13 @@
 # X-ray Preprocessing for Frost Formation Imaging
 
-Preprocessing pipeline for X-ray imagery of sublimating dry ice, supporting an ML proof-of-concept that renders frost formation from sparse imaging data.
+Preprocessing pipeline for X-ray imagery of sublimating dry ice. Output feeds into an ML proof-of-concept that renders frost formation from sparse imaging data.
 
 **Author:** Luke Waszyn
 **Lab:** Penn State HEATER Lab — Experimental Frost Setup
 
-Available in both Python and MATLAB. The two implementations are feature-equivalent; pick whichever fits your workflow.
+Available in both Python and MATLAB. Pick whichever fits your workflow — the two implementations produce the same output.
+
+> Note on terminology: this is *preprocessing* (preparing data before it goes to an ML model), not the model itself. The ML/rendering "processing" stage is planned but not implemented yet. See [Roadmap](#roadmap) below.
 
 ---
 
@@ -18,36 +20,33 @@ Given a multi-page X-ray TIFF (the sample) and optional dark/flat-field TIFFs, t
 ```
 INPUT: object.tiff, [dark.tiff], [flat.tiff]
 
-# Stage 1: Frame selection
+# Stage 1 — Frame selection
 stack <- load(object.tiff)
-if auto-detect:
-    frames <- pages where >50% of pixels are nonzero
-else:
-    frames <- stack[start:stop]
+frames <- pages where >50% of pixels are nonzero  # drops empty pages
 
-# Stage 2: Flat-field correction (per frame)
+# Stage 2 — Flat-field correction (per frame)
 for each frame in frames:
     corrected <- (frame - dark) / (flat - dark)
     # falls back to (frame - dark) if no flat
     # falls back to frame if no dark
 
-# Stage 3: Percentile normalization (per frame)
+# Stage 3 — Percentile normalization (per frame)
     lo <- 1st percentile of corrected
     hi <- 99th percentile of corrected
     normalized <- clip((corrected - lo) / (hi - lo), 0, 1)
 
-# Stage 4: Contrast enhancement (per frame)
-    clahe    <- CLAHE(normalized, clip_limit=0.01)
-    gamma    <- normalized ^ 0.6
+# Stage 4 — Contrast enhancement (per frame)
+    clahe <- CLAHE(normalized, clip_limit=0.01)
+    gamma <- normalized ^ 0.6
 
-# Stage 5: Signal averaging
+# Stage 5 — Signal averaging
 mean_stack <- mean(frames)
 # repeat stages 2-4 on mean_stack
 
-# Stage 6: Save
+# Stage 6 — Save
 for each result:
-    write 16-bit TIFF (for downstream ML)
-    write 8-bit PNG (for visual inspection)
+    write 16-bit TIFF (full grayscale precision, for ML)
+    write 8-bit PNG  (for viewing)
     write 4-panel comparison figure
 ```
 
@@ -55,12 +54,47 @@ for each result:
 
 | Step | Why |
 |---|---|
-| **Auto frame selection** | Acquisition software saves empty/partial pages; we drop them automatically so the user doesn't have to pre-clean the TIFF. |
-| **Flat-field correction** | Standard X-ray radiometry. Removes detector response non-uniformity and beam-intensity variation. |
+| **Frame selection** | Acquisition software saves empty/partial pages when captures fail. We drop them automatically so you don't have to pre-clean the TIFF. |
+| **Flat-field correction** | Standard X-ray radiometry. Removes detector baseline (dark) and corrects for beam-intensity non-uniformity (flat). |
 | **Percentile clipping** | A handful of hot/dead pixels at the extremes will otherwise collapse the useful dynamic range during min-max stretching. Clipping at 1/99 preserves >98% of pixels. |
-| **CLAHE** | The sample (dry ice) and background have very different contrast levels; global histogram equalization over- or under-corrects regions. CLAHE adapts locally, making frost/edge features visible without blowing out the bright background. |
-| **Gamma** | Alternative enhancement that doesn't amplify noise the way CLAHE can. Included for comparison. |
-| **Mean stacking** | N-frame average reduces shot noise by √N. With ~7 frames that's ~2.6× cleaner output. |
+| **CLAHE** | Sample and background have very different contrast levels; global histogram equalization over- or under-corrects regions. CLAHE adapts locally, making frost/edge features visible without blowing out the bright background. |
+| **Gamma** | Alternative enhancement. Doesn't amplify noise the way CLAHE can. Saved alongside CLAHE for comparison. |
+| **Mean stacking** | An N-frame average reduces shot noise by √N. With ~7 frames that's ~2.6× cleaner output. |
+
+---
+
+## Grayscale preservation
+
+This pipeline works with **continuous pixel intensities** at every stage. There is no thresholding to binary (no "is something there or not" decision). A pixel reading 1850 stays a number close to 1850 throughout. The only place pixels get clamped is at the percentile extremes (top/bottom 1%), and that's intentional — it removes detector defects without affecting real signal.
+
+Precision at each stage:
+
+| Stage | Type | Levels |
+|---|---|---|
+| Raw input | `uint16` | ~65,000 |
+| Flat-field math | `float32` | continuous |
+| Percentile-normalized | `float32` in [0, 1] | continuous |
+| CLAHE / Gamma | `float32` in [0, 1] | continuous |
+| **Saved `.tiff`** | **`uint16`** | **~65,000** |
+| Saved `.png` | `uint8` | 256 |
+
+**For the ML stage, always read from the `.tiff` files, not the `.png`s.** The PNGs are quantized to 8-bit for display purposes only and lose ~99% of the dynamic range.
+
+You can verify grayscale preservation on your own outputs:
+
+```matlab
+% MATLAB
+img = imread('outputs/mean_stack/normalized.tiff');
+fprintf('Distinct gray levels: %d\n', numel(unique(img(:))));
+% Should print thousands (typically 30,000 - 60,000)
+```
+
+```python
+# Python
+import tifffile, numpy as np
+img = tifffile.imread('outputs/mean_stack/normalized.tiff')
+print(f"Distinct gray levels: {len(np.unique(img))}")
+```
 
 ---
 
@@ -84,53 +118,33 @@ pip install -r requirements.txt
 python src/preprocess.py
 ```
 
-You'll be prompted to select:
-1. The object TIFF (required)
-2. A dark TIFF (optional — click Cancel to skip)
-3. A flat TIFF (optional — click Cancel to skip)
-4. An output folder
+You'll be prompted for:
+1. Object TIFF (required)
+2. Dark TIFF (optional — Cancel to skip)
+3. Flat TIFF (optional — Cancel to skip)
+4. Output folder
 
-**Command-line (for scripting):**
+**Command line:**
 
 ```bash
-python src/preprocess.py --object path/to/file.tiff --out outputs
+python src/preprocess.py --object file.tiff --dark dark.tiff --out outputs
 ```
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--object` | *(required in CLI mode)* | Input TIFF (single or multi-page) |
+| `--object` | *(required)* | Input TIFF |
 | `--dark` | none | Dark-frame TIFF |
 | `--flat` | none | Flat-field TIFF |
-| `--out` | `outputs` | Output directory |
-| `--frames` | `auto` | `auto`, `all`, or `start:stop` (e.g. `0:7`) |
+| `--out` | `outputs` | Output folder |
 | `--prefix` | none | Filename prefix to keep multiple runs separate |
-
-**Example — batch process multiple TIFFs into one folder:**
-
-```bash
-python src/preprocess.py --object run1.tiff --out outputs --prefix run1
-python src/preprocess.py --object run2.tiff --out outputs --prefix run2
-```
-
-### Notebook
-
-An exploration notebook is included for parameter tuning and figure iteration:
-
-```bash
-jupyter lab notebooks/01_explore.ipynb
-```
 
 ---
 
 ## MATLAB — Usage
 
-### Requirements
-- MATLAB R2020a or newer
-- Image Processing Toolbox (for `adapthisteq`, `imadjust`, `imread`, `imwrite`)
+Requires MATLAB R2020a+ and the Image Processing Toolbox.
 
-### Run it
-
-**Interactive** — no arguments, file dialogs open:
+**Interactive:**
 
 ```matlab
 cd matlab
@@ -140,12 +154,10 @@ preprocess_xray()
 **With arguments:**
 
 ```matlab
-preprocess_xray('object', 'path/to/file.tiff', ...
-                'dark',   'path/to/dark.tiff', ...
-                'out',    'outputs')
+preprocess_xray('object', 'file.tiff', 'dark', 'dark.tiff', 'out', 'outputs')
 ```
 
-**Named options:** `object`, `dark`, `flat`, `out`, `frames`, `prefix`, `pctLow`, `pctHigh`, `clipLim`, `gamma`. The `frames` option accepts `'auto'`, `'all'`, or a 2-element vector `[start stop]` (1-based inclusive).
+Optional name-value arguments: `object`, `dark`, `flat`, `out`, `prefix`.
 
 ---
 
@@ -154,15 +166,14 @@ preprocess_xray('object', 'path/to/file.tiff', ...
 ```
 outputs/
 ├── frame00/
-│   ├── normalized.tiff     # 16-bit, for ML/downstream processing
-│   ├── normalized.png      # 8-bit, for viewing
+│   ├── normalized.tiff   # 16-bit, for ML
+│   ├── normalized.png    # 8-bit, for viewing
 │   ├── clahe.tiff / .png
 │   └── gamma.tiff / .png
-├── frame01/                # ...one per input frame
-├── mean_stack/             # averaged composite (best SNR)
+├── frame01/  ...etc
+├── mean_stack/           # averaged composite, best SNR
 └── figures/
-    ├── frame00_comparison.png         # 4-panel: raw / normalized / CLAHE / gamma
-    ├── frame00_normalized.png
+    ├── frame00_comparison.png       # 4-panel: raw / norm / CLAHE / gamma
     ├── mean_stack_comparison.png
     └── ...
 ```
@@ -171,29 +182,27 @@ outputs/
 
 ## Roadmap
 
-The current version covers **normalization + contrast enhancement**. Planned next stages:
+Current version covers **normalization + contrast enhancement only**. Planned next stages:
 
-- **Resolution upscaling** — start with bicubic/Lanczos, move to learned SR (SwinIR, Real-ESRGAN) if the contrast-enhanced output supports it.
-- **Frost-formation renderer** — neural model trained to interpolate/extrapolate frost growth between sparse frames. Inputs: the 16-bit normalized TIFFs produced here. Ground truth: the mass-loss time series from the experimental log (weight, volume, density).
+- **Resolution upscaling** — start with bicubic/Lanczos, move to learned super-resolution (SwinIR, Real-ESRGAN) if needed.
+- **Frost-formation renderer** — neural model trained to interpolate frost growth between sparse frames. Inputs: the 16-bit normalized TIFFs. Ground truth: the mass-loss time series from the experimental log.
 
-## Known data-acquisition issues to flag to the lab
+## Known data-acquisition issues
 
-- **Dark file integrity:** the test `dark.tiff` supplied to this project was effectively all zeros (66 nonzero pixels out of ~90 million across 83 pages). Dark frames should be reacquired with the detector in standard readout mode.
-- **Frame count mismatch:** the test `object1_hole.tiff` had 21 pages but only ~7 contained real data. Confirm acquisition settings / trigger behavior.
-- **No flat-field available:** when an open-beam (no sample) exposure is available, pass it with `--flat` / `'flat'` to enable full flat-field correction.
+- **Dark integrity:** the test `dark.tiff` was effectively all zeros (66 nonzero pixels out of ~90 million). Dark frames need reacquiring with the detector in standard readout mode.
+- **Empty frames:** the test `object1_hole.tiff` had 21 pages but only ~7 with real data. Confirm acquisition trigger settings.
+- **No flat field:** when an open-beam exposure becomes available, pass it with `--flat` / `'flat'` to enable full flat-field correction.
 
 ## Repository layout
 
 ```
 .
-├── src/
-│   └── preprocess.py        # Python pipeline (CLI + interactive)
-├── matlab/
-│   └── preprocess_xray.m    # MATLAB port (same pipeline)
-├── notebooks/
-│   └── 01_explore.ipynb     # interactive tuning / figure-making
+├── src/preprocess.py         # Python pipeline
+├── matlab/preprocess_xray.m  # MATLAB port
+├── notebooks/01_explore.ipynb
 ├── requirements.txt
 ├── .gitignore
+├── LICENSE
 └── README.md
 ```
 
